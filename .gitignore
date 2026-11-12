@@ -23,3 +23,11 @@ __pycache__/
 *.log
 .env
 .env.*
+
+# AEC demo build outputs and generated runs
+/aec_demo
+/src/*.o
+/run_data/
+/third_party/speexdsp/
+/third_party/build-speex/
+/third_party/downloads/

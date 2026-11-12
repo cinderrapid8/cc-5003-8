@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考回声处理服务 · AEC 演示</title>
+<style>
+:root {
+  --bg: #0f1420; --panel: #182032; --line: #2a3550;
+  --text: #e6ebf5; --muted: #8a97b0; --accent: #4f8cff;
+  --ok: #37c98c; --warn: #e8a93d; --bad: #e85d6c;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+header { padding: 18px 24px; border-bottom: 1px solid var(--line); }
+header h1 { margin: 0 0 4px; font-size: 18px; }
+header p { margin: 0; color: var(--muted); font-size: 13px; }
+.layout { display: grid; grid-template-columns: 340px 1fr; gap: 18px; padding: 18px 24px; }
+.panel { background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 16px; }
+.panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--accent); }
+label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+input, select {
+  width: 100%; padding: 8px 10px; background: #0d1322; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; font-size: 14px;
+}
+input[type="checkbox"] { width: auto; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+button {
+  margin-top: 14px; width: 100%; padding: 10px; border: 0; border-radius: 7px;
+  background: var(--accent); color: #fff; font-weight: 600; cursor: pointer;
+}
+button.secondary { background: #2b3a58; }
+button:disabled { opacity: .5; cursor: wait; }
+.hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { padding: 7px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 600; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; }
+.badge.ok { background: rgba(55,201,140,.15); color: var(--ok); }
+.badge.warn { background: rgba(232,169,61,.15); color: var(--warn); }
+.badge.bad { background: rgba(232,93,108,.15); color: var(--bad); }
+.summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.card { background: #0d1322; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.card .k { color: var(--muted); font-size: 11px; }
+.card .v { font-size: 20px; font-weight: 700; margin-top: 4px; }
+audio { width: 100%; margin: 6px 0; }
+.track { display: grid; grid-template-columns: 130px 1fr 90px; align-items: center; gap: 8px;
+  padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.track a { color: var(--accent); text-decoration: none; font-size: 12px; }
+pre { background: #0d1322; border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px; overflow: auto; max-height: 320px; font-size: 11.5px; color: #b8c6e0; }
+#status { margin-top: 10px; font-size: 12px; color: var(--muted); min-height: 18px; }
+.interruption { border-left: 3px solid var(--warn); padding: 6px 10px; margin: 6px 0;
+  background: rgba(232,169,61,.08); border-radius: 0 6px 6px 0; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>参考回声处理服务（SpeexDSP AEC · 真实库调用）</h1>
+  <p>输入：远端参考信号 + 话筒混合信号；输出：供录制的近端声音。评估同时看回声残留与近端保留，不以输出能量变小作为成功判据。</p>
+</header>
+
+<div class="layout">
+  <div>
+    <div class="panel">
+      <h2>处理参数与测试场景</h2>
+      <label>测试场景</label>
+      <select id="scenario">
+        <option value="full">综合（延迟突变+参考中断+双讲）</option>
+        <option value="delay_jump">延迟突变</option>
+        <option value="rate_mismatch">输入采样率不匹配</option>
+        <option value="ref_outage">参考中断</option>
+        <option value="double_talk">两路同时发声（双讲）</option>
+      </select>
+
+      <label>块长度（AEC 帧长）</label>
+      <select id="frame_ms">
+        <option value="10">10 ms（160 采样 @16k）</option>
+        <option value="20">20 ms（320 采样 @16k）</option>
+      </select>
+      <div class="hint">块尺寸不一致时由适配缓冲整帧化，零填充尾块并标记，不丢采样。</div>
+
+      <label>参考延迟对齐（ms）</label>
+      <input id="ref_delay_ms" type="number" value="120" min="0" max="800" step="5">
+      <div class="hint">回声通路真实延迟为 120 ms，配错可观察 ERLE 恶化。</div>
+
+      <div class="row">
+        <div>
+          <label>自适应滤波器长度（ms）</label>
+          <input id="filter_ms" type="number" value="256" min="40" max="1000" step="8">
+        </div>
+        <div>
+          <label>时长（秒）</label>
+          <input id="duration_s" type="number" value="8" min="2" max="30" step="1">
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>话筒采样率（Hz）</label>
+          <input id="mic_rate" type="number" value="16000" min="8000" max="48000" step="100">
+        </div>
+        <div>
+          <label>远端采样率（Hz）</label>
+          <input id="far_rate" type="number" value="16000" min="8000" max="48000" step="100">
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px;">
+        <input id="bypass" type="checkbox"> 旁路模式（不做消除，用于 A/B 试听）
+      </label>
+      <label>随机种子（固定即可复现）</label>
+      <input id="seed" type="number" value="20261112">
+      <button id="run">生成并处理</button>
+      <div id="status"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="result_panel" style="display:none;">
+      <h2>结果核对（分段指标）</h2>
+      <div class="summary">
+        <div class="card"><div class="k">远端段整体 ERLE ↑</div><div class="v" id="k_erle">-</div></div>
+        <div class="card"><div class="k">近端保留（0dB=完整）</div><div class="v" id="k_keep">-</div></div>
+        <div class="card"><div class="k">受限样本数</div><div class="v" id="k_limited">-</div></div>
+        <div class="card"><div class="k">处理帧数（真实库调用）</div><div class="v" id="k_frames">-</div></div>
+      </div>
+      <table id="seg_table">
+        <thead><tr>
+          <th>场景段</th><th>时间(s)</th><th>mic RMS</th><th>输出 RMS</th>
+          <th>ERLE dB</th><th>回声泄漏 dB</th><th>近端保留 dB</th>
+          <th>与近端相关</th><th>与回声相关</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="hint" style="margin-top:8px;">
+        ERLE 仅在有回声的段有意义；参考中断段 ERLE≈0 且与回声高相关，表示<strong>未假装消除</strong>。
+        双讲段看“与近端相关”是否接近 1、“与回声相关”是否显著下降。
+      </div>
+    </div>
+
+    <div class="panel" id="interrupt_panel" style="display:none;margin-top:16px;">
+      <h2>中断 / 受限段记录</h2>
+      <div id="interrupts"></div>
+    </div>
+
+    <div class="panel" id="listen_panel" style="display:none;margin-top:16px;">
+      <h2>旁路试听与导出</h2>
+      <div id="tracks"></div>
+    </div>
+
+    <div class="panel" id="manifest_panel" style="display:none;margin-top:16px;">
+      <h2>运行记录（输入版本 / 参数 / 中断）</h2>
+      <pre id="manifest"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+function badgeFor(label) {
+  if (label.includes("outage")) return '<span class="badge bad">受限</span>';
+  if (label.includes("recovery")) return '<span class="badge warn">重收敛</span>';
+  if (label.includes("double")) return '<span class="badge ok">双讲</span>';
+  return '<span class="badge ok">正常</span>';
+}
+function fmt(x, d=2) { return (x===null||x===undefined||!isFinite(x)) ? "-" : Number(x).toFixed(d); }
+
+$("run").onclick = async () => {
+  const btn = $("run"); btn.disabled = true; $("status").textContent = "处理中…";
+  const payload = {
+    scenario: $("scenario").value,
+    frame_ms: +$("frame_ms").value,
+    ref_delay_ms: +$("ref_delay_ms").value,
+    filter_ms: +$("filter_ms").value,
+    mic_rate: +$("mic_rate").value,
+    far_rate: +$("far_rate").value,
+    duration_s: +$("duration_s").value,
+    bypass: $("bypass").checked,
+    seed: +$("seed").value
+  };
+  try {
+    const r = await fetch("/api/run", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "请求失败");
+    render(data);
+    $("status").textContent = "完成：" + data.run_id;
+  } catch (e) {
+    $("status").textContent = "失败：" + e.message;
+  } finally { btn.disabled = false; }
+};
+
+function render(data) {
+  const m = data.manifest, s = m.summary;
+  $("result_panel").style.display = "block";
+  $("k_erle").textContent = fmt(s.overall_erle_db) + " dB";
+  $("k_keep").textContent = fmt(s.overall_near_keep_db) + " dB";
+  $("k_limited").textContent = s.limited_samples;
+  $("k_frames").textContent = s.frames_processed;
+
+  const tb = document.querySelector("#seg_table tbody");
+  tb.innerHTML = "";
+  for (const seg of m.segments) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${seg.label} ${badgeFor(seg.label)}</td>
+      <td>${fmt(seg.start_s,1)}–${fmt(seg.end_s,1)}</td>
+      <td>${fmt(seg.mic_rms,4)}</td><td>${fmt(seg.out_rms,4)}</td>
+      <td>${fmt(seg.erle_db)}</td><td>${fmt(seg.echo_leak_db)}</td>
+      <td>${fmt(seg.near_keep_db)}</td>
+      <td>${fmt(seg.corr_out_near,3)}</td><td>${fmt(seg.corr_out_echo,3)}</td>`;
+    tb.appendChild(tr);
+  }
+
+  const ip = $("interrupt_panel"); ip.style.display = "block";
+  $("interrupts").innerHTML = m.interruptions.length
+    ? m.interruptions.map(x =>
+        `<div class="interruption"><strong>${fmt(x.start_s,2)}s – ${fmt(x.end_s,2)}s</strong><br>${x.reason}</div>`
+      ).join("")
+    : '<div class="hint">无中断段。</div>';
+
+  const names = {
+    "mic_mix.wav":"话筒混合（原始）","far_reference.wav":"远端参考",
+    "near_clean.wav":"近端真值（评估基准）","echo_only.wav":"纯回声分量",
+    "aec_output.wav":"AEC 输出（录制用）","bypass_mic.wav":"旁路（未消除）"
+  };
+  $("listen_panel").style.display = "block";
+  $("tracks").innerHTML = data.files
+    .filter(f => f.endsWith(".wav"))
+    .map(f => {
+      const name = decodeURIComponent(f.split("/").pop());
+      return `<div class="track"><span>${names[name]||name}</span>
+        <audio controls preload="none" src="${f}"></audio>
+        <a href="${f}" download>下载 WAV</a></div>`;
+    }).join("");
+
+  $("manifest_panel").style.display = "block";
+  $("manifest").textContent = JSON.stringify(m, null, 2);
+}
+</script>
+</body>
+</html>
