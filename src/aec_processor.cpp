@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 #include <speex/speex_resampler.h>
 
@@ -92,25 +93,72 @@ bool AecProcessor::run(const std::vector<int16_t>& far, int far_rate,
         resample_validity(ref_valid, mic_rate, rate, n);
 
     // ---- Stage 2: reference delay alignment ------------------------------
-    // The mic hears the loudspeaker delayed by ref_delay_ms, so sample i of
-    // acoustic echo corresponds to reference sample i - delay. We feed the
-    // AEC a reference delayed by the same amount (leading zeros inserted).
-    int delay = rate * cfg_.ref_delay_ms / 1000;
-    result.applied_ref_delay_samples = delay;
-    std::vector<int16_t> ref_aligned(n, 0);
-    for (size_t i = 0; i + delay < n; ++i)
-        ref_aligned[i + delay] = far_i[i];
-    // Explicit outage timeline shifted with the same alignment delay.
-    std::vector<bool> valid_aligned(n, true);
-    for (size_t i = 0; i + delay < n; ++i)
-        valid_aligned[i + delay] = valid[i];
-    // Pre-roll before the first aligned reference is not an interruption
-    // event: no reference exists yet by construction, so the AEC simply
-    // adapts through these frames with a zero reference.
-    std::vector<bool> preroll(n, false);
-    for (int i = 0; i < delay && i < static_cast<int>(n); ++i) {
-        valid_aligned[i] = true;
-        preroll[i] = true;
+    // Two switchable adapters sit before the same echo canceller and emit the
+    // same per-frame reference contract.
+    //   FIXED  : one-shot static alignment from configuration (the historical
+    //            fixed reference-delay buffer; it cannot follow a moving path).
+    //   DYNAMIC: per-frame constrained tracking with double-talk gating.
+    int initial_delay = rate * cfg_.ref_delay_ms / 1000;
+    result.applied_ref_delay_samples = initial_delay;
+    result.adapter_mode = cfg_.delay_adapter_mode;
+
+    std::vector<int16_t> ref_aligned;
+    std::vector<bool> valid_aligned;
+    std::unique_ptr<DelayAdapter> adapter_owner;
+    DelayAdapter* adapter = nullptr;
+
+    if (cfg_.delay_adapter_mode == DelayAdapterMode::DYNAMIC) {
+        DelayAdapterConfig dac;
+        dac.mode = DelayAdapterMode::DYNAMIC;
+        dac.frame_size = frame;
+        dac.initial_delay_samples = initial_delay;
+        dac.max_delay_samples =
+            rate * (cfg_.adapter_max_delay_ms > 0 ? cfg_.adapter_max_delay_ms
+                                                  : 400) /
+            1000;
+        dac.search_margin_samples =
+            rate * (cfg_.adapter_search_margin_ms > 0
+                        ? cfg_.adapter_search_margin_ms
+                        : 120) /
+            1000;
+        dac.lag_grid_samples = std::max(1, rate / 200); // 5 ms grid
+        dac.max_step_samples =
+            rate * (cfg_.adapter_max_step_ms > 0 ? cfg_.adapter_max_step_ms
+                                                 : 40) /
+            1000;
+        dac.confirm_frames =
+            cfg_.adapter_confirm_frames > 0 ? cfg_.adapter_confirm_frames : 5;
+        dac.cooldown_frames =
+            cfg_.adapter_cooldown_frames > 0 ? cfg_.adapter_cooldown_frames
+                                             : 10;
+        dac.peak_threshold = cfg_.adapter_peak_threshold > 0.0
+                                 ? cfg_.adapter_peak_threshold
+                                 : 0.30;
+        dac.naive_gate_off = cfg_.adapter_naive_gate_off;
+        adapter_owner = std::make_unique<DelayAdapter>(dac);
+        adapter = adapter_owner.get();
+        // The dynamic adapter emits references frame by frame below; the
+        // explicit outage timeline stays on the mic time base (no static
+        // shift, since alignment itself is now adaptive).
+        valid_aligned = valid;
+        valid_aligned.resize(n, true);
+    } else {
+        // The mic hears the loudspeaker delayed by ref_delay_ms, so sample i
+        // of acoustic echo corresponds to reference sample i - delay. We feed
+        // the AEC a reference delayed by the same amount (leading zeros).
+        int delay = initial_delay;
+        ref_aligned.assign(n, 0);
+        for (size_t i = 0; i + static_cast<size_t>(delay) < n; ++i)
+            ref_aligned[i + delay] = far_i[i];
+        // Explicit outage timeline shifted with the same alignment delay.
+        valid_aligned.assign(n, true);
+        for (size_t i = 0; i + static_cast<size_t>(delay) < n; ++i)
+            valid_aligned[i + delay] = valid[i];
+        // Pre-roll before the first aligned reference is not an interruption
+        // event: no reference exists yet by construction, so the AEC simply
+        // adapts through these frames with a zero reference.
+        for (int i = 0; i < delay && i < static_cast<int>(n); ++i)
+            valid_aligned[i] = true;
     }
 
     // ---- Stage 3: Speex AEC over fixed frames via adapter buffers --------
@@ -125,6 +173,8 @@ bool AecProcessor::run(const std::vector<int16_t>& far, int far_rate,
     }
 
     result.out.resize(n);
+    if (cfg_.delay_adapter_mode == DelayAdapterMode::DYNAMIC)
+        ref_aligned.assign(n, 0); // filled frame by frame by the adapter
     result.ref_used = ref_aligned;
     result.mode.assign(n, static_cast<uint8_t>(FrameMode::OK));
     // Extend to a whole number of frames with explicit zero padding so every
@@ -176,12 +226,25 @@ bool AecProcessor::run(const std::vector<int16_t>& far, int far_rate,
     while (pushed < total) {
         size_t take = std::min(chunk, total - pushed);
         mic_adapter.push(mic_i.data() + pushed, take);
-        ref_adapter.push(ref_aligned.data() + pushed, take);
+        // Dynamic mode buffers raw reference inside the adapter; fixed mode
+        // consumes the already statically aligned reference stream.
+        ref_adapter.push(adapter ? far_i.data() + pushed
+                                 : ref_aligned.data() + pushed,
+                         take);
         pushed += take;
 
         std::vector<int16_t> mframe, rframe;
         while (mic_adapter.pop(mframe) && ref_adapter.pop(rframe)) {
             size_t base = frame_index * frame;
+            if (adapter) {
+                // Adapter emits the aligned reference for this mic frame;
+                // rframe currently holds the raw (unshifted) reference.
+                std::vector<int16_t> aligned;
+                adapter->align_frame(rframe.data(), mframe.data(), aligned);
+                rframe = aligned;
+                std::memcpy(ref_aligned.data() + base, rframe.data(),
+                            frame * sizeof(int16_t));
+            }
             // Explicit reference outage from the stream's validity timeline.
             bool gt_missing = false;
             for (int k = 0; k < frame; ++k)
@@ -271,6 +334,14 @@ bool AecProcessor::run(const std::vector<int16_t>& far, int far_rate,
     }
     close_seg(n);
     close_note(n);
+
+    if (adapter) {
+        result.adapter_records = adapter->records();
+        result.adapter_stats = adapter->stats();
+        result.adapter_final_delay_samples =
+            adapter->current_delay_samples();
+        result.ref_used = ref_aligned;
+    }
 
     if (st_) {
         speex_echo_state_destroy(st_);

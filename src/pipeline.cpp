@@ -83,6 +83,11 @@ bool pipeline_run(const RunRequest& req, RunArtifact& art,
         err = "sample rates must be within 8k..48k";
         return false;
     }
+    if (req.delay_adapter != "fixed" && req.delay_adapter != "dynamic" &&
+        req.delay_adapter != "dynamic_naive") {
+        err = "delay_adapter must be fixed, dynamic or dynamic_naive";
+        return false;
+    }
 
     art.request = req;
     ScenarioConfig sc;
@@ -117,6 +122,11 @@ bool pipeline_run(const RunRequest& req, RunArtifact& art,
     ac.filter_ms = req.filter_ms;
     ac.ref_delay_ms = req.ref_delay_ms;
     ac.bypass = req.bypass;
+    if (req.delay_adapter == "dynamic" ||
+        req.delay_adapter == "dynamic_naive") {
+        ac.delay_adapter_mode = DelayAdapterMode::DYNAMIC;
+        ac.adapter_naive_gate_off = (req.delay_adapter == "dynamic_naive");
+    }
     AecProcessor proc(ac);
     if (!proc.run(art.gen.far, sc.far_rate, art.gen.mic, sc.mic_rate,
                   art.gen.ref_valid, art.run, err))
@@ -149,7 +159,36 @@ bool pipeline_run(const RunRequest& req, RunArtifact& art,
         JsonValue::make_num(art.run.aec_filter_length);
     p.obj["applied_ref_delay_samples"] =
         JsonValue::make_num(art.run.applied_ref_delay_samples);
+    p.obj["delay_adapter"] = JsonValue::make_str(req.delay_adapter);
     root.obj["parameters"] = p;
+
+    if (art.run.adapter_mode == DelayAdapterMode::DYNAMIC) {
+        JsonValue ad;
+        ad.type = JsonValue::Type::Object;
+        const auto& st = art.run.adapter_stats;
+        ad.obj["frames"] = JsonValue::make_num(static_cast<double>(st.frames));
+        ad.obj["updates"] =
+            JsonValue::make_num(static_cast<double>(st.updates));
+        ad.obj["eligible_frames"] =
+            JsonValue::make_num(static_cast<double>(st.eligible_frames));
+        ad.obj["gate_silent_ref"] =
+            JsonValue::make_num(static_cast<double>(st.gate_silent_ref));
+        ad.obj["gate_silent_mic"] =
+            JsonValue::make_num(static_cast<double>(st.gate_silent_mic));
+        ad.obj["gate_double_talk"] =
+            JsonValue::make_num(static_cast<double>(st.gate_double_talk));
+        ad.obj["gate_low_peak"] =
+            JsonValue::make_num(static_cast<double>(st.gate_low_peak));
+        ad.obj["gate_hold"] =
+            JsonValue::make_num(static_cast<double>(st.gate_hold));
+        ad.obj["gate_cooldown"] =
+            JsonValue::make_num(static_cast<double>(st.gate_cooldown));
+        ad.obj["max_abs_step_samples"] =
+            JsonValue::make_num(static_cast<double>(st.max_abs_step));
+        ad.obj["final_delay_ms"] = JsonValue::make_num(
+            1000.0 * art.run.adapter_final_delay_samples / art.run.rate);
+        root.obj["delay_adapter_diagnostics"] = std::move(ad);
+    }
 
     JsonValue iv;
     iv.type = JsonValue::Type::Object;

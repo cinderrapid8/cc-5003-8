@@ -93,6 +93,8 @@ void handle_run(int fd, const std::string& payload) {
     req.mic_rate = static_cast<int>(json_get_number(req_json, "mic_rate", 16000));
     req.duration_s = json_get_number(req_json, "duration_s", 8.0);
     req.bypass = json_get_bool(req_json, "bypass", false);
+    req.delay_adapter =
+        json_get_string(req_json, "delay_adapter", "fixed");
     req.seed = static_cast<uint32_t>(
         json_get_number(req_json, "seed", 20261112));
 

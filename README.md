@@ -10,17 +10,21 @@
 src/
   main.cpp          CLI 入口（demo / server / accept 三种模式）
   signal_gen.*      可重复信号生成：类语音 + 已知延迟/衰减/房间响应的回声通路
+  delay_adapter.*   回声组件前置的延迟适配器：固定缓冲 / 受限动态跟踪（可切换）
   aec_processor.*   核心处理：真实 Speex AEC、块适配、参考对齐、中断检测与状态标记
   metrics.*         分段评估：ERLE、回声泄漏、近端保留、与真值的相关性
   wav_io.*          16-bit PCM WAV 读写（试听/导出）
   json.*            轻量 JSON 解析/生成（网页 API 用，无外部依赖）
   pipeline.*        生成→处理→评估→记录→导出 的编排与运行清单
   http_server.*     POSIX socket 内建 HTTP 服务（静态页 + JSON API + 文件下载）
-web/index.html      配置网页（块长度、参考延迟、场景、采样率、旁路、试听）
+web/index.html      配置网页（块长度、参考延迟、延迟适配方案、场景、采样率、旁路、试听）
 tests/
-  test_contracts.cpp  处理契约单元测试（不丢采样、旁路、中断标记、重采样、可复现）
+  test_contracts.cpp  处理契约单元测试（不丢采样、旁路、中断标记、重采样、可复现、适配器契约）
+  delay_experiment.cpp 固定 vs 动态延迟适配对比实验（延迟突变 / 双讲 / 综合压力）
+  verify_delay_experiment.py 独立重算实验 WAV/CSV，对账残留回声、近端保留与延迟轨迹
   verify_run.py       独立核对脚本：从导出的 WAV 重新计算指标，不信任 C++ 结果
-  acceptance.sh       端到端验收（四类压力场景 + 20ms 块）
+  acceptance.sh       端到端验收（四类压力场景 + 20ms 块 + 两种延迟适配模式）
+experiments/delay_adapter/  延迟适配实验产物与结论（含未验证假设清单）
 third_party/         本地编译的 SpeexDSP（无需 root / 系统安装）
 ```
 
@@ -32,6 +36,7 @@ SpeexDSP 已在 `third_party/speexdsp` 本地编译（静态/动态库均有）�
 make            # 产出 ./aec_demo（无警告，-Wall -Wextra -std=c++17）
 make test       # 处理契约单元测试
 make accept     # 端到端验收 + 独立 WAV 核对
+make delay-exp  # 延迟适配对比实验 + 独立 Python 重算对账
 ```
 
 ## 3. 运行方式
@@ -39,7 +44,8 @@ make accept     # 端到端验收 + 独立 WAV 核对
 ```bash
 # 单次演示（命令行打印分段指标，WAV 与清单写入 run_data/<run_id>/）
 ./aec_demo demo --scenario full --duration 12 \
-                --frame-ms 10 --ref-delay-ms 120 --filter-ms 256
+                --frame-ms 10 --ref-delay-ms 120 --filter-ms 256 \
+                --delay-adapter dynamic      # fixed|dynamic|dynamic_naive
 
 # 网页服务：浏览器打开 http://localhost:8080
 ./aec_demo server --port 8080 --web-root web
@@ -47,6 +53,12 @@ make accept     # 端到端验收 + 独立 WAV 核对
 # 全部验收场景
 ./aec_demo accept
 ```
+
+`--delay-adapter` 选择回声组件**前置**的参考延迟接入方案：`fixed` 为固定参考延迟
+缓冲（不跟踪），`dynamic` 为受限动态跟踪（仅在观测可靠、通过双讲/静音/弱峰门控时
+更新），`dynamic_naive` 为关闭全部门控的消融对照（勿用于生产）。三者输出格式一致、
+共用同一 Speex 回声组件；HTTP 字段 `delay_adapter` 与网页下拉框同步接通，
+逐帧门控原因与更新统计写入运行清单的 `delay_adapter_diagnostics`。
 
 网页可配置：测试场景、**块长度（10/20ms）**、**参考延迟**、滤波器长度、
 两路采样率、时长、随机种子、旁路开关；提供每路 WAV 的在线试听与下载。
@@ -104,6 +116,23 @@ make accept     # 端到端验收 + 独立 WAV 核对
 延迟突变后 ERLE 暂时变负、再随自适应滤波重收敛逐步恢复，是 Speex MDF 的真实行为，
 系统如实呈现而非掩盖。参考延迟配错（扫描见 `tests/delay_sweep.cpp`）时 ERLE 明显恶化，
 可用于反证时间基准对应的重要性。
+
+## 6A. 延迟适配方案实验（固定缓冲 vs 受限动态跟踪）
+
+完整结论、取舍表与**未验证假设清单**见
+[`experiments/delay_adapter/README.md`](experiments/delay_adapter/README.md)。
+要点：
+
+- 两种适配器作为可切换前置实现跑在**同一** Speex 回声组件前，输出格式一致；
+- 双讲时独立近端声源污染互相关曲面，动态方案据此设置更新资格门控
+  （静音参考/静音话筒/双讲/弱峰/滞后裕度/确认与冷却），观测不可靠时**冻结而非盲动**；
+- 实测（固定种子，可 `make delay-exp` 复跑）：稳定路径上动态方案与配对正确的固定
+  缓冲零差异且零漂移；仅远端跳变后动态方案约 0.7s 自动重锁，固定方案未预知新延迟则
+  永不恢复；跳变落在双讲/静音中时重锁被推迟到下一个可靠观测窗；无门控消融每帧追逐
+  噪声滞后，双讲近端相关由约 0.83 崩到约 0.24；
+- 结论默认采用受限动态跟踪、固定缓冲作为回退，并给出明确适用/不适用条件；
+- `verify_delay_experiment.py` 独立重读每路 WAV/CSV 重算 ERLE、回声泄漏、近端保留、
+  相关系数并与 `results.json` 逐项对账，验证延迟轨迹对真值的诚实性。
 
 ## 7. 运行记录（版本 / 参数 / 中断）
 

@@ -7,6 +7,7 @@
 
 #include <speex/speex_echo.h>
 
+#include "delay_adapter.h"
 #include "signal_gen.h"
 
 struct AecConfig {
@@ -15,6 +16,18 @@ struct AecConfig {
     int filter_ms = 256;         // adaptive filter length, ms
     int ref_delay_ms = 0;        // configured reference delay alignment, ms
     bool bypass = false;         // passthrough (no cancellation) for A/B listen
+    // Delay alignment adapter placed before the echo canceller. FIXED keeps
+    // the historical one-shot static alignment; DYNAMIC tracks the echo-path
+    // delay with eligibility gating. Both emit the same frame contract.
+    DelayAdapterMode delay_adapter_mode = DelayAdapterMode::FIXED;
+    // Dynamic-only tuning; zero means use built-in defaults at run time.
+    int adapter_max_delay_ms = 0;
+    int adapter_search_margin_ms = 0;
+    int adapter_confirm_frames = 0;
+    int adapter_cooldown_frames = 0;
+    int adapter_max_step_ms = 0;
+    double adapter_peak_threshold = 0.0;
+    bool adapter_naive_gate_off = false;
 };
 
 enum class FrameMode {
@@ -41,11 +54,16 @@ struct AecRunResult {
     std::vector<InterruptionSegment> interruptions;
     int aec_frame_size = 0;
     int aec_filter_length = 0;
-    int applied_ref_delay_samples = 0;
+    int applied_ref_delay_samples = 0; // FIXED: static delay; DYNAMIC: initial
     int resampled_far = 0;          // nonzero when far rate != internal rate
     int resampled_mic = 0;
     int64_t frames_processed = 0;
     std::string library_id;
+    // Delay-adapter diagnostics (empty when no adapter is active).
+    DelayAdapterMode adapter_mode = DelayAdapterMode::FIXED;
+    std::vector<DelayFrameRecord> adapter_records;
+    DelayAdapterStats adapter_stats{};
+    int adapter_final_delay_samples = 0;
 };
 
 // Processes one full recording. Block size mismatches between caller chunks

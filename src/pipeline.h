@@ -17,6 +17,8 @@ struct RunRequest {
     double duration_s = 8.0;
     bool bypass = false;
     uint32_t seed = 20261112;
+    // Delay alignment adapter in front of the echo canceller.
+    std::string delay_adapter = "fixed"; // fixed|dynamic|dynamic_naive
 };
 
 struct RunArtifact {

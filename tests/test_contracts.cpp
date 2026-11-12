@@ -69,7 +69,8 @@ int main() {
         size_t n = rate * 2;
         std::vector<int16_t> far(n, 1000), mic(n, 2000);
         std::vector<bool> valid(n, true);
-        for (size_t i = rate / 2; i < rate; ++i) valid[i] = false;
+        for (size_t i = static_cast<size_t>(rate) / 2;
+             i < static_cast<size_t>(rate); ++i) valid[i] = false;
         AecConfig cfg;
         cfg.internal_rate = rate;
         cfg.frame_ms = 10;
@@ -90,7 +91,8 @@ int main() {
         check(limited > 0, "outage frames must be flagged");
         // Inside the outage the mic is passed through (no faked cancellation).
         bool passthrough = true;
-        for (size_t i = rate / 2; i < rate; ++i)
+        for (size_t i = static_cast<size_t>(rate) / 2;
+             i < static_cast<size_t>(rate); ++i)
             if (r.out[i] != mic[i]) { passthrough = false; break; }
         check(passthrough, "missing-reference frames must pass mic through");
     }
@@ -138,6 +140,84 @@ int main() {
         check(gc.mic != ga.mic, "different seed must change the signal");
     }
     std::printf("[ok] deterministic, reproducible signal generation\n");
+
+    // Contract 6: fixed delay adapter never moves regardless of observations.
+    {
+        const int rate = 16000, frame = 160, n = rate * 3;
+        const int fixed_delay = rate / 10; // 100 ms
+        std::vector<int16_t> far(n), mic(n, 0);
+        unsigned s = 98765;
+        for (int i = 0; i < n; ++i) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            far[i] = static_cast<int16_t>((s % 2001) - 1000);
+        }
+        // Mic carries the reference at a DIFFERENT delay; fixed must ignore it.
+        for (int i = fixed_delay * 2; i < n; ++i) mic[i] = far[i - fixed_delay * 2];
+        DelayAdapterConfig d;
+        d.mode = DelayAdapterMode::FIXED;
+        d.frame_size = frame;
+        d.initial_delay_samples = fixed_delay;
+        d.max_delay_samples = rate / 3;
+        DelayAdapter ad(d);
+        for (int f = 0; f < n / frame; ++f) {
+            std::vector<int16_t> out;
+            ad.align_frame(far.data() + f * frame, mic.data() + f * frame, out);
+        }
+        check(ad.current_delay_samples() == fixed_delay,
+              "fixed adapter must hold its configured delay");
+        check(ad.stats().updates == 0, "fixed adapter must never update");
+    }
+    std::printf("[ok] fixed delay adapter holds configuration\n");
+
+    // Contract 7: gated dynamic adapter locks onto a clean known delay.
+    {
+        const int rate = 16000, frame = 160, n = rate * 4;
+        const int true_delay = static_cast<int>(0.12 * rate);
+        std::vector<int16_t> far(n), mic(n, 0);
+        unsigned s = 12345;
+        for (int i = 0; i < n; ++i) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            far[i] = static_cast<int16_t>((s % 2001) - 1000);
+        }
+        for (int i = true_delay; i < n; ++i) mic[i] = far[i - true_delay];
+        DelayAdapterConfig d;
+        d.mode = DelayAdapterMode::DYNAMIC;
+        d.frame_size = frame;
+        d.initial_delay_samples = 0;
+        d.max_delay_samples = static_cast<int>(0.4 * rate);
+        d.search_margin_samples = static_cast<int>(0.12 * rate);
+        d.lag_grid_samples = rate / 200;
+        d.max_step_samples = static_cast<int>(0.04 * rate);
+        DelayAdapter ad(d);
+        for (int f = 0; f < n / frame; ++f) {
+            std::vector<int16_t> out;
+            ad.align_frame(far.data() + f * frame, mic.data() + f * frame, out);
+        }
+        check(std::abs(ad.current_delay_samples() - true_delay) <= frame,
+              "dynamic adapter must lock onto the true echo delay");
+        check(ad.stats().updates > 0, "dynamic adapter must have moved");
+    }
+    std::printf("[ok] gated dynamic adapter tracks a clean delay\n");
+
+    // Contract 8: a frame record is emitted per frame with a valid reason.
+    {
+        const int rate = 16000, frame = 160, n = rate * 2;
+        std::vector<int16_t> far(n, 500), mic(n, 500);
+        DelayAdapterConfig d;
+        d.mode = DelayAdapterMode::DYNAMIC;
+        d.frame_size = frame;
+        d.max_delay_samples = rate / 4;
+        DelayAdapter ad(d);
+        for (int f = 0; f < n / frame; ++f) {
+            std::vector<int16_t> out;
+            ad.align_frame(far.data() + f * frame, mic.data() + f * frame, out);
+            check(static_cast<int>(out.size()) == frame,
+                  "adapter output frame size must match AEC frame");
+        }
+        check(static_cast<int>(ad.records().size()) == n / frame,
+              "one delay record per processed frame");
+    }
+    std::printf("[ok] adapter frame records and output contract\n");
 
     std::printf("all unit tests passed\n");
     return 0;

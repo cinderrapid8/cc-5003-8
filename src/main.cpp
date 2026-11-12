@@ -17,6 +17,7 @@ void print_usage() {
         "               [--frame-ms 10|20] [--ref-delay-ms N]\n"
         "               [--filter-ms N] [--far-rate N] [--mic-rate N]\n"
         "               [--duration S] [--seed N] [--bypass]\n"
+        "               [--delay-adapter fixed|dynamic|dynamic_naive]\n"
         "  aec_demo server [--port 8080] [--web-root web]\n"
         "  aec_demo accept [--web-root web]   # run all acceptance scenarios\n");
 }
@@ -175,6 +176,8 @@ int main(int argc, char** argv) {
             req.seed = static_cast<uint32_t>(std::strtoul(next("20261112").c_str(),
                                                           nullptr, 10));
         else if (a == "--bypass") req.bypass = true;
+        else if (a == "--delay-adapter")
+            req.delay_adapter = next("fixed");
         else if (a == "--port") scfg.port = std::atoi(next("8080").c_str());
         else if (a == "--web-root") scfg.web_root = next("web");
         else {

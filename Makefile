@@ -10,12 +10,14 @@ LDLIBS := -L$(SPEEX_PREFIX)/lib -Wl,-rpath,$(abspath $(SPEEX_PREFIX)/lib) \
           -lspeexdsp -lpthread
 
 SRC := src/main.cpp src/wav_io.cpp src/signal_gen.cpp src/aec_processor.cpp \
-       src/metrics.cpp src/json.cpp src/pipeline.cpp src/http_server.cpp
+       src/delay_adapter.cpp src/metrics.cpp src/json.cpp src/pipeline.cpp \
+       src/http_server.cpp
 OBJ := $(SRC:.cpp=.o)
 BIN := aec_demo
 TEST_BIN := /tmp/aec_test_contracts
+DELAY_EXP_BIN := /tmp/aec_delay_experiment
 
-.PHONY: all clean speex test accept
+.PHONY: all clean speex test accept delay-exp
 
 all: $(BIN)
 
@@ -24,6 +26,18 @@ $(BIN): $(OBJ)
 
 %.o: %.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+# Delay-adapter comparison experiment (fixed vs constrained dynamic tracking),
+# followed by an independent Python re-derivation of every reported metric.
+delay-exp: $(DELAY_EXP_BIN)
+	$(DELAY_EXP_BIN)
+	python3 -I tests/verify_delay_experiment.py
+
+verify-delay: delay-exp
+
+$(DELAY_EXP_BIN): tests/delay_experiment.cpp $(filter-out src/main.o,$(OBJ))
+	$(CXX) $(CPPFLAGS) -Isrc $(CXXFLAGS) tests/delay_experiment.cpp \
+	  $(filter-out src/main.o,$(OBJ)) -o $@ $(LDLIBS)
 
 # Compile-time + processing-contract unit tests.
 test: $(TEST_BIN)

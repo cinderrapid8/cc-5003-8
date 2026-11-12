@@ -26,6 +26,11 @@ run_case "double talk"       --scenario double_talk
 # 5. Combined stress and an alternate block length (adapter buffer path).
 run_case "full combined"     --scenario full --duration 12
 run_case "20 ms blocks"      --scenario full --frame-ms 20 --duration 12
+# 6. Both production delay-adapter modes through the real CLI contact point.
+run_case "fixed adapter"     --scenario full --duration 12 \
+                             --delay-adapter fixed
+run_case "dynamic adapter"   --scenario delay_jump --duration 12 \
+                             --delay-adapter dynamic
 
 echo
 echo "all acceptance cases passed"

@@ -89,6 +89,14 @@ pre { background: #0d1322; border: 1px solid var(--line); border-radius: 8px;
       <input id="ref_delay_ms" type="number" value="120" min="0" max="800" step="5">
       <div class="hint">回声通路真实延迟为 120 ms，配错可观察 ERLE 恶化。</div>
 
+      <label>延迟适配方案（回声组件前置）</label>
+      <select id="delay_adapter">
+        <option value="fixed">固定参考延迟缓冲（不跟踪）</option>
+        <option value="dynamic">受限动态跟踪（双讲/静音门控）</option>
+        <option value="dynamic_naive">动态无门控（消融对照，勿用于生产）</option>
+      </select>
+      <div class="hint">两种适配器输出格式一致、共用同一 Speex 回声组件；动态方案仅在观测可靠时更新延迟。</div>
+
       <div class="row">
         <div>
           <label>自适应滤波器长度（ms）</label>
@@ -180,6 +188,7 @@ $("run").onclick = async () => {
     far_rate: +$("far_rate").value,
     duration_s: +$("duration_s").value,
     bypass: $("bypass").checked,
+    delay_adapter: $("delay_adapter").value,
     seed: +$("seed").value
   };
   try {
